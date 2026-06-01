@@ -43,7 +43,7 @@
         .roi-guide {
             position: absolute;
             top: 50%; left: 50%;
-            transform: translate(-55%, -50%);
+            transform: translate(-50%, -50%);
             width: 224px; height: 224px;
             border: 3px solid #2ecc71;
             box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.4);
@@ -135,7 +135,9 @@
     let isRunning = false;
     let timerId = null;
 
-    // 请求调用本地摄像头
+    // 固定 ROI 坐标（与 recognition.py 完全一致）
+    const ROI = { x: 200, y: 100, w: 224, h: 224 };
+
     async function setupWebcam() {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
@@ -147,16 +149,29 @@
         }
     }
 
-    // 周期性抓取单帧并向 Flask 接口请求推理结果
     function sendFrame() {
         if (!isRunning) return;
-        
-        // 将当前视频画面画入隐藏的 canvas
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        // 转化为 base64 字符串格式
-        let dataURL = canvas.toDataURL('image/jpeg', 0.7);
 
-        // 异步发往后台 /predict 路由
+        // 将当前视频帧绘制到 canvas（全图 640x480）
+        ctx.save();
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+
+        // 从 canvas 中裁剪 ROI 区域
+        let roiImageData = ctx.getImageData(ROI.x, ROI.y, ROI.w, ROI.h);
+        
+        // 创建一个临时 canvas 用于存放 ROI 并导出 base64
+        let tempCanvas = document.createElement('canvas');
+        tempCanvas.width = ROI.w;
+        tempCanvas.height = ROI.h;
+        let tempCtx = tempCanvas.getContext('2d');
+        tempCtx.putImageData(roiImageData, 0, 0);
+        
+        // 无损压缩
+        let dataURL = tempCanvas.toDataURL('image/png');
+
         fetch('/predict', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -169,8 +184,7 @@
                 document.getElementById('result-conf').innerText = data.confidence;
                 document.getElementById('result-time').innerText = data.latency;
             }
-            // 收到上一帧的回执后，延迟 100ms 继续发送下一帧，保障页面流畅与后台防卡死
-            if (isRunning) setTimeout(sendFrame, 100);
+            if (isRunning) setTimeout(sendFrame, 300);
         })
         .catch(err => {
             console.error("通讯故障:", err);
@@ -198,7 +212,6 @@
         }
     }
 
-    // 页面加载完成后自动初始化摄像头
     window.onload = () => {
         setupWebcam();
     };

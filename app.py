@@ -10,7 +10,14 @@ import onnxruntime as ort
 app = Flask(__name__)
 
 # 定义手语字母映射 (A-Y, 缺少J)
-CLASS_NAMES = [chr(65 + i) for i in range(25)]
+#CLASS_NAMES = [chr(65 + i) for i in range(25)]
+# 1. 严格对齐 25 个输出槽位，填充被跳过的 'J'（可以随便写个占位符，防止索引错位）
+CLASS_NAMES = [
+    'A','B','C','D','E','F','G','H','I',
+    'SKIP_J', # 对应标签 9（Sign Language MNIST 中缺失）
+    'K','L','M','N','O','P','Q','R',
+    'S','T','U','V','W','X','Y'
+]
 
 # 1. 载入端侧部署的中间件模型 (ONNX模型)
 ONNX_PATH = "mobilenet_v2_sign.onnx"
@@ -21,32 +28,35 @@ else:
     ort_session = ort.InferenceSession(ONNX_PATH, providers=['CPUExecutionProvider'])
 
 def preprocess_image(image_base64):
-    """前端传来的Base64图片预处理，适配MobileNetV2输入"""
-    # 解码base64图片
+    """
+    像素级对齐版：完美还原 model_train.py 训练集的数据分布
+    剔除导致特征严重畸变的 CLAHE 和高斯模糊，只做纯净的单通道克隆
+    """
+    # 解码前端 Base64 图像
     img_data = base64.b64decode(image_base64.split(',')[1])
     nparr = np.frombuffer(img_data, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR) # 读入 BGR 图像
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR) # 读入为 BGR
+    #print(f"原始图像尺寸: {img.shape}，像素范围：{img.min()}~ {img.max()}") # 输出原始图像尺寸，便于调试
     
-    # 镜像翻转、裁剪及缩放
-    img = cv2.flip(img, 1)
-    # 模拟真实部署时的中央区域裁剪 (Center Crop)
-    h, w, _ = img.shape
-    crop_size = min(h, w)
-    start_x = (w - crop_size) // 2
-    start_y = (h - crop_size) // 2
-    roi = img[start_y:start_y+crop_size, start_x:start_x+crop_size]
+    roi=img
     
-    # 缩放到 MobileNet 标准输入 224x224 并转为 RGB
-    roi_resized = cv2.resize(roi, (224, 224))
-    rgb_img = cv2.cvtColor(roi_resized, cv2.COLOR_BGR2RGB)
+    #  核心对齐：先转灰度图（抹除肤色、环境光干扰，回归 MNIST 灰度本质）
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+    # 将单通道灰度图复制 3 份堆叠成三通道 RGB
+    rgb_simulated = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
     
-    # 归一化处理 (完美匹配 PyTorch 的 transforms.Normalize)
-    img_data = rgb_img.astype(np.float32) / 255.0
+    # 5. 缩放到 224x224 (MobileNetV2 标准输入尺寸)
+    roi_resized = cv2.resize(rgb_simulated, (224, 224))
+    
+    # 6. 归一化并进行标准的 ImageNet 均值/标准差归一化 (必须与 model_train.py 严格一致)
+    img_data = roi_resized.astype(np.float32) / 255.0
+    #print(f"归一化后均值: {img_data.mean():.3f}, 标准差: {img_data.std():.3f}")
     mean = np.array([0.485, 0.456, 0.406])
     std = np.array([0.229, 0.224, 0.225])
     img_data = (img_data - mean) / std
     
-    # 调整通道顺序 [H, W, C] -> [C, H, W]，并增加 Batch 维度 -> [1, C, H, W]
+    # 7. 调整通道维度 [H, W, C] -> [C, H, W] 并增加 Batch 维度 -> [1, C, H, W]
     img_data = np.transpose(img_data, (2, 0, 1))
     img_data = np.expand_dims(img_data, axis=0).astype(np.float32)
     return img_data
@@ -84,15 +94,27 @@ def predict():
         confidence = float(probs[pred_idx])
         pred_char = CLASS_NAMES[pred_idx]
         
-        return jsonify({
-            'status': 'success',
-            'prediction': pred_char,
-            'confidence': f"{confidence:.1%}",
-            'latency': f"{inference_time:.1f}ms"
+        # 在解析出 pred_char 和 confidence 后，做一层过滤：
+        if confidence < 0.40:  # 门槛设为 40%
+            return jsonify({
+                'status': 'success',
+                'prediction': '检测中...', # 置信度太低时不瞎猜
+                'confidence': f"{confidence:.1%}",
+                'latency': f"{inference_time:.1f}ms"
+            })
+        else:
+            return jsonify({
+                'status': 'success',
+                'prediction': pred_char,
+                'confidence': f"{confidence:.1%}",
+                'latency': f"{inference_time:.1f}ms"
         })
         
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(i)}), 500
+        return jsonify({
+            'status': 'error', 
+            'message': str(e)
+        }), 500
 
 if __name__ == '__main__':
     # 启动本地服务，控制台打印提示

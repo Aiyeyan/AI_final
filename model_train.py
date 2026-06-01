@@ -9,6 +9,7 @@ from torchvision.models import MobileNet_V2_Weights
 from torch.utils.data import Subset
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
+import time
 
 # 兼容 1通道 和 3通道 的数据集加载
 class SignLanguageDataset(Dataset):
@@ -37,15 +38,16 @@ class SignLanguageDataset(Dataset):
             image = self.transform(image)
         return image, label
 
-def plot_training_curves(train_losses, train_accs, val_accs, save_path='training_curves.png'):
+def plot_training_curves(train_losses, train_accs, val_losses, val_accs, save_path='training_curves.png'):
     epochs = range(1, len(train_losses) + 1)
     plt.figure(figsize=(12, 5))
     
     plt.subplot(1, 2, 1)
     plt.plot(epochs, train_losses, 'b-', label='Training Loss')
+    plt.plot(epochs, val_losses, 'r-', label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('Training Loss Curve')
+    plt.title('Loss Curve')
     plt.legend()
     plt.grid(True)
     
@@ -79,10 +81,28 @@ def train_model():
     # 针对 MobileNetV2 的数据增强与预处理 (224x224 RGB)
     train_transform = transforms.Compose([
         transforms.Resize((224, 224)),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
+
+        transforms.RandomRotation(20),   
+
+        transforms.RandomAffine(
+            degrees=0,
+            translate=(0.1,0.1),
+            scale=(0.9,1.1)
+        ),
+
+        transforms.RandomHorizontalFlip(),
+
+        transforms.ColorJitter( #均从0.3-》0.5
+            brightness=0.5,
+            contrast=0.5
+        ),
+
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+        transforms.Normalize(
+            [0.485,0.456,0.406],
+            [0.229,0.224,0.225]
+        )
     ])
     
     val_transform = transforms.Compose([
@@ -98,21 +118,22 @@ def train_model():
     val_full_dataset = SignLanguageDataset('data/sign_mnist_train.csv', transform=val_transform, is_rgb=True)
     val_dataset = Subset(val_full_dataset, val_idx)
 
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True) # 使用多个CPU核心并行加载;锁页内存，加速数据传输到GPU
     val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
     model = get_mobilenet_model(num_classes=25).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.0005, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)  #lr:0.0005->0.0001 ->0.001
     # 引入余弦退火学习率调度器
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=15)
 
     best_acc = 0.0
     epochs = 15
 
-    train_losses, train_accs, val_accs = [], [], []
+    train_losses, train_accs,val_losses, val_accs = [], [], [], []
 
     print("Starting Training (MobileNetV2 Transfer Learning)...")
+    start_time=time.perf_counter()
     for epoch in range(epochs):
         model.train()
         running_loss, correct, total = 0.0, 0, 0
@@ -136,20 +157,25 @@ def train_model():
         epoch_train_acc = correct / total
         
         model.eval()
+        val_loss = 0.0
         val_correct, val_total = 0, 0
         with torch.no_grad():
             for images, labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
                 outputs = model(images)
+                loss = criterion(outputs, labels)      # 计算验证损失
+                val_loss += loss.item()
                 _, predicted = outputs.max(1)
                 val_total += labels.size(0)
                 val_correct += predicted.eq(labels).sum().item()
         
         epoch_val_acc = val_correct / val_total
+        epoch_val_loss = val_loss / len(val_loader)
         
         train_losses.append(epoch_train_loss)
         train_accs.append(epoch_train_acc)
         val_accs.append(epoch_val_acc)
+        val_losses.append(epoch_val_loss)   # 新增
         
         print(f"Epoch [{epoch+1}/{epochs}] Loss: {epoch_train_loss:.4f} "
               f"Train Acc: {epoch_train_acc:.4f} Val Acc: {epoch_val_acc:.4f} LR: {scheduler.get_last_lr()[0]:.6f}")
@@ -159,7 +185,13 @@ def train_model():
             torch.save(model.state_dict(), 'best_mobilenet_v2.pth')
             print(f"--> Best Model Saved (Accuracy: {epoch_val_acc:.4f})")
 
-    plot_training_curves(train_losses, train_accs, val_accs)
+    end_time=time.perf_counter()
+    total_time=end_time-start_time
+    print(f'Total training time: {total_time:.2f} seconds')
+    print(f'模型训练完成！总耗时: {total_time // 60:.0f} 分 {total_time % 60:.0f} 秒')
+    print(f"Training completed in {end_time-start_time:.2f} seconds")
+
+    plot_training_curves(train_losses, train_accs, val_losses,val_accs)
     
     # --- 端侧部署准备：导出 ONNX 格式 ---
     print("\n[端侧部署] 正在导出 ONNX 模型格式...")

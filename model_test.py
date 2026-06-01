@@ -66,6 +66,7 @@ def test():
                 error_images.append((images[0], true, pred))
 
     avg_inference_time = total_time / (num_samples - 11)
+    print(f'测试集总推演耗时: {total_time:.4f} 秒')
     print(f"\n量化模型平均单张推理耗时: {avg_inference_time:.4f} 秒 ({1/avg_inference_time:.1f} FPS) (基于CPU)")
     
     print("\nMobileNetV2 (Quantized) - 分类报告:")

@@ -8,7 +8,13 @@ import time
 from model_train import get_mobilenet_model
 
 DEVICE = torch.device("cpu") # 强制使用CPU模拟端侧推理
-CLASS_NAMES = [chr(65 + i) for i in range(25)]
+#CLASS_NAMES = [chr(65 + i) for i in range(25)]
+# 同样修正标签映射
+CLASS_NAMES = [
+    'A','B','C','D','E','F','G','H','I',
+    'SKIP_J', 'K','L','M','N','O','P','Q','R',
+    'S','T','U','V','W','X','Y'
+]
 
 ROI_TOP, ROI_LEFT = 100, 200
 ROI_SIZE = 224  # 直接使用224匹配MobileNet输入
@@ -45,7 +51,7 @@ def main():
         if not ret: break
 
         frame = cv2.flip(frame, 1)
-        h, w = frame.shape[:2]
+        #h, w = frame.shape[:2]
 
         x1, y1 = ROI_LEFT, ROI_TOP
         x2, y2 = x1 + ROI_SIZE, y1 + ROI_SIZE
@@ -54,8 +60,15 @@ def main():
         roi = frame[y1:y2, x1:x2]
         
         # 预处理
-        rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb)
+        #rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+        #pil_img = Image.fromarray(rgb)
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+
+        # 转回 PIL
+        #pil_img = Image.fromarray(thresh).convert("RGB")
+        # 直接转回三通道 RGB 并走 transform
+        pil_img = Image.fromarray(gray).convert("RGB")
         input_tensor = transform(pil_img).unsqueeze(0)
 
         # 推理并计算时间
